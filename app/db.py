@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     select,
+    text,
     update,
 )
 from sqlalchemy.ext.asyncio import (
@@ -113,14 +114,21 @@ def _ensure_locale_columns(sync_conn: Any) -> None:
 
 
 def _has_column(sync_conn: Any, table: str, column: str) -> bool:
+    # Allowlist only — identifiers are not end-user input.
+    if table not in {"bindings", "outbox"} or not column.isidentifier():
+        raise ValueError(f"refusing column probe for {table!r}.{column!r}")
     dialect = sync_conn.dialect.name
     if dialect == "sqlite":
         rows = sync_conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
         return any(row[1] == column for row in rows)
-    rows = sync_conn.exec_driver_sql(
-        "SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = :table AND column_name = :column",
-        {"table": table, "column": column},
+    # exec_driver_sql uses DBAPI paramstyle; :name is SQLAlchemy text() only
+    # and blows up under asyncpg ("syntax error at or near ':'").
+    rows = sync_conn.execute(
+        text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = :table_name AND column_name = :column_name"
+        ),
+        {"table_name": table, "column_name": column},
     ).fetchall()
     return bool(rows)
 
