@@ -23,7 +23,9 @@ from app.db import BindingStore, KeyStore, create_engine, create_session_factory
 from app.zitadel_auth import load_machine_key_from_env_or_file, mint_access_token
 
 
-DEFAULT_ENDPOINT = "http://zitadel-notify:8080/zitadel/hook"
+# Pinned bridge IP (not Docker DNS): AddEmailProviderHTTP resolves the host for
+# denylist checks while notify may still be down (no signing key → no container).
+DEFAULT_ENDPOINT = "http://172.30.50.2:8080/zitadel/hook"
 
 
 class CliSettings(BaseSettings):
@@ -124,11 +126,22 @@ def _client(settings: CliSettings, access_token: str) -> httpx.AsyncClient:
     )
 
 
+def _raise_for_status(resp: httpx.Response, *, action: str) -> None:
+    if not resp.is_error:
+        return
+    detail: object = resp.text
+    try:
+        detail = resp.json()
+    except Exception:
+        pass
+    raise RuntimeError(f"{action} failed (HTTP {resp.status_code}): {detail}")
+
+
 async def _find_http_provider(
     client: httpx.AsyncClient, endpoint: str
 ) -> dict | None:
     resp = await client.post("/admin/v1/email/_search", json={})
-    resp.raise_for_status()
+    _raise_for_status(resp, action="list email providers")
     for item in resp.json().get("result") or []:
         http = item.get("http") or {}
         if http.get("endpoint") == endpoint:
@@ -138,7 +151,7 @@ async def _find_http_provider(
 
 async def _activate(client: httpx.AsyncClient, provider_id: str) -> None:
     activate = await client.post(f"/admin/v1/email/{provider_id}/_activate", json={})
-    activate.raise_for_status()
+    _raise_for_status(activate, action=f"activate email provider {provider_id}")
 
 
 async def _rotate_signing_key(
@@ -156,7 +169,7 @@ async def _rotate_signing_key(
             "expirationSigningKey": "0s",
         },
     )
-    update.raise_for_status()
+    _raise_for_status(update, action=f"rotate email provider {provider_id}")
     body = update.json()
     signing_key = body.get("signingKey") or body.get("signing_key")
     if not signing_key:
@@ -204,7 +217,7 @@ async def cmd_register(settings: CliSettings) -> int:
                 "/admin/v1/email/http",
                 json={"endpoint": endpoint, "description": description},
             )
-            create.raise_for_status()
+            _raise_for_status(create, action="add HTTP email provider")
             body = create.json()
             provider_id = body["id"]
             signing_key = body["signingKey"]

@@ -20,7 +20,7 @@ def _settings(**kwargs: Any) -> CliSettings:
         "DATABASE_URL": "sqlite+aiosqlite:///:memory:",
         "ZITADEL_BASE_URL": "https://zitadel.example.com",
         "ZITADEL_ACCESS_TOKEN": "test-token",
-        "ZITADEL_PROVIDER_ENDPOINT": "http://zitadel-notify:8080/zitadel/hook",
+        "ZITADEL_PROVIDER_ENDPOINT": "http://172.30.50.2:8080/zitadel/hook",
     }
     base.update(kwargs)
     return CliSettings(**base)  # type: ignore[arg-type]
@@ -28,6 +28,8 @@ def _settings(**kwargs: Any) -> CliSettings:
 
 def _resp(payload: dict) -> SimpleNamespace:
     return SimpleNamespace(
+        is_error=False,
+        text="",
         raise_for_status=lambda: None,
         json=lambda: payload,
     )
@@ -44,7 +46,7 @@ async def test_register_noop_when_local_key_exists(tmp_path) -> None:
         store = KeyStore(session, seal)
         await store.upsert_provider_meta(
             provider_id="prov-1",
-            endpoint="http://zitadel-notify:8080/zitadel/hook",
+            endpoint="http://172.30.50.2:8080/zitadel/hook",
             description="Telegram notifier",
         )
         await store.store_active(
