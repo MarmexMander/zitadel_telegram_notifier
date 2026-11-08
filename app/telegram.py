@@ -77,6 +77,7 @@ class TelegramClient:
         body_text: str,
         url: str | None,
         button_text: str | None,
+        open_link_label: str = "Open",
     ) -> None:
         safe_subject = html.escape(subject or "Notification")
         safe_greeting = html.escape(greeting or "")
@@ -94,7 +95,9 @@ class TelegramClient:
                 ]
             }
         elif url:
-            parts.append(f'<a href="{html.escape(url, quote=True)}">Open</a>')
+            # Zitadel already localized buttonText when present; this label is bot chrome.
+            safe_label = html.escape(open_link_label or "Open")
+            parts.append(f'<a href="{html.escape(url, quote=True)}">{safe_label}</a>')
         await self.send_text(chat_id, "\n\n".join(parts), reply_markup=markup)
 
     async def notify_admins(self, admin_chat_ids: list[int], text: str) -> None:

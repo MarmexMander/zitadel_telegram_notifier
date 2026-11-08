@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from app.handles import UNMATCHED_START_MESSAGE
+from app.i18n import t
 from app.service import NotifierService
 
 
@@ -45,7 +45,7 @@ async def test_unmatched_start_message(session, seal, settings) -> None:
 
     assert len(tg.sent) == 1
     assert tg.sent[0]["chat_id"] == 42
-    assert tg.sent[0]["text"] == UNMATCHED_START_MESSAGE
+    assert tg.sent[0]["text"] == t("unmatched_start", "en")
     # No contact points / links in the unmatched copy.
     assert "@" not in tg.sent[0]["text"]
     assert "http" not in tg.sent[0]["text"].lower()
@@ -67,7 +67,7 @@ async def test_start_without_username(session, seal, settings) -> None:
         }
     )
 
-    assert tg.sent[0]["text"] == UNMATCHED_START_MESSAGE
+    assert tg.sent[0]["text"] == t("unmatched_start", "en")
 
 
 @pytest.mark.asyncio

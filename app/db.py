@@ -56,6 +56,8 @@ class BindingRow(Base):
     preferred_login_name: Mapped[str] = mapped_column(String(320), primary_key=True)
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True)
     telegram_username: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Normalized catalog key (en/uk); refreshed from Zitadel preferredLanguage when present.
+    locale: Mapped[str] = mapped_column(String(16), nullable=False, default="en")
     pinned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -66,6 +68,8 @@ class OutboxRow(Base):
     handle: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     preferred_login_name: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
     event_type: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    # Normalized locale from payload at enqueue (default en when absent).
+    locale: Mapped[str] = mapped_column(String(16), nullable=False, default="en")
     encrypted_payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -95,6 +99,30 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
 async def init_db(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_ensure_locale_columns)
+
+
+def _ensure_locale_columns(sync_conn: Any) -> None:
+    """Add locale columns on existing DBs created before i18n (create_all is no-op)."""
+    for table in ("bindings", "outbox"):
+        if _has_column(sync_conn, table, "locale"):
+            continue
+        sync_conn.exec_driver_sql(
+            f"ALTER TABLE {table} ADD COLUMN locale VARCHAR(16) NOT NULL DEFAULT 'en'"
+        )
+
+
+def _has_column(sync_conn: Any, table: str, column: str) -> bool:
+    dialect = sync_conn.dialect.name
+    if dialect == "sqlite":
+        rows = sync_conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+        return any(row[1] == column for row in rows)
+    rows = sync_conn.exec_driver_sql(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = :table AND column_name = :column",
+        {"table": table, "column": column},
+    ).fetchall()
+    return bool(rows)
 
 
 class KeyStore:
@@ -226,19 +254,31 @@ class BindingStore:
         preferred_login_name: str,
         telegram_user_id: int,
         telegram_username: str,
+        locale: str = "en",
     ) -> BindingRow:
         existing = await self.get_by_login(preferred_login_name)
         if existing is not None:
+            if locale and existing.locale != locale:
+                existing.locale = locale
+                await self._session.flush()
             return existing
         row = BindingRow(
             preferred_login_name=preferred_login_name,
             telegram_user_id=telegram_user_id,
             telegram_username=telegram_username.casefold(),
+            locale=locale or "en",
             pinned_at=_utcnow(),
         )
         self._session.add(row)
         await self._session.flush()
         return row
+
+    async def set_locale(self, preferred_login_name: str, locale: str) -> None:
+        row = await self.get_by_login(preferred_login_name)
+        if row is None or row.locale == locale:
+            return
+        row.locale = locale
+        await self._session.flush()
 
     async def unlink(self, preferred_login_name: str) -> bool:
         """Clear Telegram pin for a login. Returns True if a row was deleted."""
@@ -263,6 +303,7 @@ class OutboxStore:
         event_type: str,
         payload: dict[str, Any],
         ttl_hours: int,
+        locale: str = "en",
     ) -> OutboxRow:
         now = _utcnow()
         row = OutboxRow(
@@ -270,6 +311,7 @@ class OutboxStore:
             handle=handle,
             preferred_login_name=preferred_login_name,
             event_type=event_type,
+            locale=locale or "en",
             encrypted_payload=self._seal.encrypt(
                 json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
             ),

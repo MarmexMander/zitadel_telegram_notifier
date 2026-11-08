@@ -1,5 +1,7 @@
 # zitadel-telegram-notifier
 
+[![CI](https://github.com/MarmexMander/zitadel_telegram_notifier/actions/workflows/ci.yml/badge.svg)](https://github.com/MarmexMander/zitadel_telegram_notifier/actions/workflows/ci.yml)
+
 Delivers Zitadel HTTP email-provider notifications into private Telegram chats.
 
 Zitadel posts signed payloads to an internal Docker endpoint; Telegram reaches this service only on `https://notifier.zitadel.ascend.<domain>/telegram/webhook`. Console invites put the Telegram username in **Nickname** (`args.nickName`).
@@ -18,9 +20,23 @@ Image: `ghcr.io/marmexmander/zitadel-telegram-notifier`
 
 - Match Telegram username to `args.nickName` (strip `@`, casefold, 5–32 `[A-Za-z0-9_]`).
 - First matching `/start` pins `chat_id` to `args.preferredLoginName`.
-- Unmatched `/start`: *You are not in the system yet. Wait for an invitation from the admin.* (no contact points).
+- Unmatched `/start`: localized wait-for-admin copy (no contact points).
 - Private chats only; leave groups. Messages use HTML escape, no link preview, `protect_content`, invite URL as inline button.
 - Outbox encrypted at rest under `MASTER_KEY`; deleted after delivery and at ~72h expiry.
+
+## Locales
+
+Bot-authored strings (unmatched `/start`, admin invalid-nickname alert, fallback “Open” link label) are localized. Zitadel already renders `templateData` subject/text/buttonText in the user’s language — those are delivered as-is.
+
+**Source of truth:** `args.preferredLanguage` on the HTTP email-provider payload (also `PreferredLanguage` / `preferred_language`, or nested under `args.profile`). Tags normalize to catalog keys (`en-US` → `en`, `uk-UA` → `uk`). When the field is absent (common on stock Zitadel v4.16 webhooks, which use PreferredLanguage for templates but do not always put it in `args`), fallback is the locale stored on the binding/outbox, then **`en`**. Unmatched `/start` has no Zitadel context: default `en`, with Telegram `language_code` as last resort only.
+
+Shipped catalogs: `en`, `uk`. Locale is persisted on outbox rows and bindings; later events refresh the binding when `preferredLanguage` is present.
+
+### Adding a language
+
+1. Add the ISO primary tag to `SUPPORTED_LOCALES` in `app/i18n.py`.
+2. Add translations for every msgid in `_CATALOGS` (`unmatched_start`, `admin_invalid_nickname`, `open_link`).
+3. Cover normalization + one unmatched `/start` case in `tests/test_i18n.py`.
 
 ## Signing keys
 
@@ -71,7 +87,12 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-Coverage includes signature verification (valid / bad / stale / rotation overlap), unmatched `/start` copy, and outbox delivery after `/start`.
+Coverage includes signature verification (valid / bad / stale / rotation overlap), unmatched `/start` copy (incl. locale fallback), locale extraction/normalization, and outbox delivery after `/start`.
+
+## CI
+
+- **CI** (`.github/workflows/ci.yml`): on PRs and pushes to `main`, runs `pytest` on Python 3.12 (matches the Dockerfile). Optional `ruff` lint is non-blocking.
+- **Docker** (`.github/workflows/docker.yml`): on pushes to `main` and tags `v*`, builds and pushes `ghcr.io/marmexmander/zitadel-telegram-notifier` (`sha`, `latest` on main, semver on version tags). Needs `packages: write` for `GITHUB_TOKEN`.
 
 ## Assumptions
 

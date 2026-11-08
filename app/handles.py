@@ -6,10 +6,6 @@ import re
 
 _HANDLE_RE = re.compile(r"^[A-Za-z0-9_]{5,32}$")
 
-UNMATCHED_START_MESSAGE = (
-    "You are not in the system yet. Wait for an invitation from the admin."
-)
-
 
 class InvalidHandleError(ValueError):
     pass
