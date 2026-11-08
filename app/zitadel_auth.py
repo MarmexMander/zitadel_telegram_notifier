@@ -35,6 +35,7 @@ def mint_access_token(
     Requires scope urn:zitadel:iam:org:project:id:zitadel:aud.
     """
     key = load_machine_key(machine_key)
+    # aud must be the issuer / custom domain, not the token URL (ZITADEL JWT Profile).
     base = base_url.rstrip("/")
     token_url = f"{base}/oauth/v2/token"
     now = int(time.time())
@@ -42,7 +43,7 @@ def mint_access_token(
         {
             "iss": key["userId"],
             "sub": key["userId"],
-            "aud": token_url,
+            "aud": base,
             "iat": now,
             "exp": now + lifetime_seconds,
         },
@@ -60,7 +61,17 @@ def mint_access_token(
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
-        resp.raise_for_status()
+        if resp.is_error:
+            detail = resp.text
+            try:
+                detail = resp.json()
+            except Exception:
+                pass
+            raise httpx.HTTPStatusError(
+                f"token endpoint {resp.status_code}: {detail}",
+                request=resp.request,
+                response=resp,
+            )
         body = resp.json()
     token = body.get("access_token")
     if not token:

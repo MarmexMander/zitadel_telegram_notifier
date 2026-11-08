@@ -70,7 +70,7 @@ def test_mint_access_token_posts_jwt_bearer(monkeypatch: pytest.MonkeyPatch) -> 
         assertion,
         options={"verify_signature": False},
         algorithms=["RS256"],
-        audience="https://zitadel.example.com/oauth/v2/token",
+        audience="https://zitadel.example.com",
     )
     assert decoded["iss"] == "user-1"
     assert decoded["sub"] == "user-1"
