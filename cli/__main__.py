@@ -20,7 +20,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.crypto import Seal, fingerprint
 from app.db import BindingStore, KeyStore, create_engine, create_session_factory, init_db
-from app.zitadel_auth import mint_access_token
+from app.zitadel_auth import load_machine_key_from_env_or_file, mint_access_token
 
 
 DEFAULT_ENDPOINT = "http://zitadel-notify:8080/zitadel/hook"
@@ -42,6 +42,7 @@ class CliSettings(BaseSettings):
 
     zitadel_base_url: str = Field(default="", alias="ZITADEL_BASE_URL")
     zitadel_machine_key_json: str = Field(default="", alias="ZITADEL_MACHINE_KEY_JSON")
+    zitadel_machine_key_file: str = Field(default="", alias="ZITADEL_MACHINE_KEY_FILE")
     zitadel_access_token: str = Field(default="", alias="ZITADEL_ACCESS_TOKEN")
     # Legacy name for a bearer token; prefer machine key or short-lived ACCESS_TOKEN.
     zitadel_pat: str = Field(default="", alias="ZITADEL_PAT")
@@ -77,16 +78,25 @@ class CliSettings(BaseSettings):
     def resolve_access_token(self) -> str:
         """Mint or return a bearer token for Admin API calls."""
         self.require_zitadel_base()
-        if self.zitadel_machine_key_json.strip():
+        if self.zitadel_machine_key_file.strip() or self.zitadel_machine_key_json.strip():
+            machine_key = load_machine_key_from_env_or_file(
+                json_env=self.zitadel_machine_key_json,
+                file_path=self.zitadel_machine_key_file,
+            )
+            print(
+                "minting Zitadel access token "
+                f"(userId={machine_key['userId']} keyId={machine_key['keyId']} "
+                f"base={self.zitadel_base_url.rstrip('/')})"
+            )
             return mint_access_token(
                 base_url=self.zitadel_base_url,
-                machine_key=self.zitadel_machine_key_json,
+                machine_key=machine_key,
             )
         token = self.zitadel_access_token.strip() or self.zitadel_pat.strip()
         if not token:
             raise ValueError(
-                "set ZITADEL_MACHINE_KEY_JSON (preferred) or "
-                "ZITADEL_ACCESS_TOKEN / ZITADEL_PAT"
+                "set ZITADEL_MACHINE_KEY_FILE or ZITADEL_MACHINE_KEY_JSON "
+                "(preferred) or ZITADEL_ACCESS_TOKEN / ZITADEL_PAT"
             )
         return token
 

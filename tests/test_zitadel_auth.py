@@ -25,7 +25,14 @@ def _rsa_pem() -> str:
 
 def test_load_machine_key_requires_fields() -> None:
     with pytest.raises(ValueError, match="keyId"):
-        load_machine_key({"userId": "u", "key": "k"})
+        load_machine_key({"userId": "u", "key": "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----"})
+
+
+def test_load_machine_key_coerces_ids_to_str() -> None:
+    pem = _rsa_pem()
+    data = load_machine_key({"keyId": 11, "userId": 22, "key": pem})
+    assert data["keyId"] == "11"
+    assert data["userId"] == "22"
 
 
 def test_mint_access_token_posts_jwt_bearer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,6 +46,15 @@ def test_mint_access_token_posts_jwt_bearer(monkeypatch: pytest.MonkeyPatch) -> 
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/.well-known/openid-configuration"):
+            return httpx.Response(
+                200,
+                json={
+                    "issuer": "https://zitadel.example.com",
+                    "token_endpoint": "https://zitadel.example.com/oauth/v2/token",
+                },
+            )
         captured["url"] = str(request.url)
         captured["body"] = request.read().decode()
         return httpx.Response(
@@ -74,5 +90,39 @@ def test_mint_access_token_posts_jwt_bearer(monkeypatch: pytest.MonkeyPatch) -> 
     )
     assert decoded["iss"] == "user-1"
     assert decoded["sub"] == "user-1"
+    assert "https://zitadel.example.com:443" in decoded["aud"]
     header = jwt.get_unverified_header(assertion)
     assert header.get("kid") == "kid-1"
+
+
+def test_mint_access_token_surfaces_token_error_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pem = _rsa_pem()
+    machine = {"keyId": "k", "userId": "u", "key": pem}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/.well-known/openid-configuration"):
+            return httpx.Response(
+                200,
+                json={
+                    "issuer": "https://zitadel.example.com",
+                    "token_endpoint": "https://zitadel.example.com/oauth/v2/token",
+                },
+            )
+        return httpx.Response(
+            400, json={"error": "invalid_grant", "error_description": "audience"}
+        )
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.Client
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", client_factory)
+
+    with pytest.raises(RuntimeError, match="invalid_grant") as exc:
+        mint_access_token(base_url="https://zitadel.example.com", machine_key=machine)
+    assert "aud=" in str(exc.value)
