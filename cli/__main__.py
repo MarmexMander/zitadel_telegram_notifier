@@ -1,4 +1,11 @@
-"""python -m cli register|rotate|unlink"""
+"""python -m cli register|rotate|unlink
+
+Auth for register/rotate (prefer machine-user JWT key; never store a long-lived PAT in vault):
+
+- ZITADEL_MACHINE_KEY_JSON — full Zitadel service-account key JSON → short-lived access token
+- ZITADEL_ACCESS_TOKEN — already-minted bearer (seconds–minutes)
+- ZITADEL_PAT — legacy alias for a bearer token (discouraged for automation)
+"""
 
 from __future__ import annotations
 
@@ -13,6 +20,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.crypto import Seal, fingerprint
 from app.db import BindingStore, KeyStore, create_engine, create_session_factory, init_db
+from app.zitadel_auth import mint_access_token
 
 
 DEFAULT_ENDPOINT = "http://zitadel-notify:8080/zitadel/hook"
@@ -32,8 +40,10 @@ class CliSettings(BaseSettings):
     pg_database: str | None = Field(default=None, alias="PG_DATABASE")
     pg_sslmode: str = Field(default="disable", alias="PG_SSLMODE")
 
-    # Required for register/rotate only (short-lived PAT; never used by the service).
     zitadel_base_url: str = Field(default="", alias="ZITADEL_BASE_URL")
+    zitadel_machine_key_json: str = Field(default="", alias="ZITADEL_MACHINE_KEY_JSON")
+    zitadel_access_token: str = Field(default="", alias="ZITADEL_ACCESS_TOKEN")
+    # Legacy name for a bearer token; prefer machine key or short-lived ACCESS_TOKEN.
     zitadel_pat: str = Field(default="", alias="ZITADEL_PAT")
     zitadel_provider_endpoint: str = Field(
         default=DEFAULT_ENDPOINT, alias="ZITADEL_PROVIDER_ENDPOINT"
@@ -60,9 +70,25 @@ class CliSettings(BaseSettings):
         if not self.master_key.strip():
             raise ValueError("MASTER_KEY is required")
 
-    def require_zitadel_pat(self) -> None:
-        if not self.zitadel_base_url.strip() or not self.zitadel_pat.strip():
-            raise ValueError("ZITADEL_BASE_URL and ZITADEL_PAT are required")
+    def require_zitadel_base(self) -> None:
+        if not self.zitadel_base_url.strip():
+            raise ValueError("ZITADEL_BASE_URL is required")
+
+    def resolve_access_token(self) -> str:
+        """Mint or return a bearer token for Admin API calls."""
+        self.require_zitadel_base()
+        if self.zitadel_machine_key_json.strip():
+            return mint_access_token(
+                base_url=self.zitadel_base_url,
+                machine_key=self.zitadel_machine_key_json,
+            )
+        token = self.zitadel_access_token.strip() or self.zitadel_pat.strip()
+        if not token:
+            raise ValueError(
+                "set ZITADEL_MACHINE_KEY_JSON (preferred) or "
+                "ZITADEL_ACCESS_TOKEN / ZITADEL_PAT"
+            )
+        return token
 
     @property
     def sqlalchemy_url(self) -> str:
@@ -76,11 +102,11 @@ class CliSettings(BaseSettings):
         )
 
 
-def _client(settings: CliSettings) -> httpx.AsyncClient:
+def _client(settings: CliSettings, access_token: str) -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url=settings.zitadel_base_url.rstrip("/"),
         headers={
-            "Authorization": f"Bearer {settings.zitadel_pat}",
+            "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         },
@@ -88,36 +114,99 @@ def _client(settings: CliSettings) -> httpx.AsyncClient:
     )
 
 
+async def _find_http_provider(
+    client: httpx.AsyncClient, endpoint: str
+) -> dict | None:
+    resp = await client.post("/admin/v1/email/_search", json={})
+    resp.raise_for_status()
+    for item in resp.json().get("result") or []:
+        http = item.get("http") or {}
+        if http.get("endpoint") == endpoint:
+            return item
+    return None
+
+
+async def _activate(client: httpx.AsyncClient, provider_id: str) -> None:
+    activate = await client.post(f"/admin/v1/email/{provider_id}/_activate", json={})
+    activate.raise_for_status()
+
+
+async def _rotate_signing_key(
+    client: httpx.AsyncClient,
+    *,
+    provider_id: str,
+    endpoint: str,
+    description: str,
+) -> str:
+    update = await client.put(
+        f"/admin/v1/email/http/{provider_id}",
+        json={
+            "endpoint": endpoint,
+            "description": description,
+            "expirationSigningKey": "0s",
+        },
+    )
+    update.raise_for_status()
+    body = update.json()
+    signing_key = body.get("signingKey") or body.get("signing_key")
+    if not signing_key:
+        raise RuntimeError("rotate/update response missing signingKey")
+    return signing_key
+
+
 async def cmd_register(settings: CliSettings) -> int:
     settings.require_master_key()
-    settings.require_zitadel_pat()
+    access_token = settings.resolve_access_token()
     engine = create_engine(settings.sqlalchemy_url)
     await init_db(engine)
     session_factory = create_session_factory(engine)
     seal = Seal(settings.master_key)
+    endpoint = settings.zitadel_provider_endpoint
+    description = settings.zitadel_provider_description
 
-    async with _client(settings) as client:
-        create = await client.post(
-            "/admin/v1/email/http",
-            json={
-                "endpoint": settings.zitadel_provider_endpoint,
-                "description": settings.zitadel_provider_description,
-            },
-        )
-        create.raise_for_status()
-        body = create.json()
-        provider_id = body["id"]
-        signing_key = body["signingKey"]
+    async with session_factory() as session:
+        store = KeyStore(session, seal)
+        if await store.has_active_key() and await store.get_provider_id():
+            provider_id = await store.get_provider_id()
+            print(
+                f"already registered locally provider id={provider_id}; nothing to do"
+            )
+            await engine.dispose()
+            return 0
 
-        activate = await client.post(f"/admin/v1/email/{provider_id}/_activate", json={})
-        activate.raise_for_status()
+    async with _client(settings, access_token) as client:
+        existing = await _find_http_provider(client, endpoint)
+        if existing:
+            provider_id = existing["id"]
+            state = existing.get("state") or ""
+            if state != "EMAIL_PROVIDER_STATE_ACTIVE":
+                await _activate(client, provider_id)
+            # DB empty or wiped: force a new signing key into our store.
+            signing_key = await _rotate_signing_key(
+                client,
+                provider_id=provider_id,
+                endpoint=endpoint,
+                description=description,
+            )
+            action = "recovered"
+        else:
+            create = await client.post(
+                "/admin/v1/email/http",
+                json={"endpoint": endpoint, "description": description},
+            )
+            create.raise_for_status()
+            body = create.json()
+            provider_id = body["id"]
+            signing_key = body["signingKey"]
+            await _activate(client, provider_id)
+            action = "registered"
 
     async with session_factory() as session:
         store = KeyStore(session, seal)
         await store.upsert_provider_meta(
             provider_id=provider_id,
-            endpoint=settings.zitadel_provider_endpoint,
-            description=settings.zitadel_provider_description,
+            endpoint=endpoint,
+            description=description,
         )
         await store.store_active(
             provider_id=provider_id,
@@ -129,14 +218,16 @@ async def cmd_register(settings: CliSettings) -> int:
         await session.commit()
 
     await engine.dispose()
-    print(f"registered provider id={provider_id} key_fp={fingerprint(signing_key)}")
-    print("signing key stored encrypted in DB; clear ZITADEL_PAT from your shell.")
+    print(
+        f"{action} provider id={provider_id} key_fp={fingerprint(signing_key)}"
+    )
+    print("signing key stored encrypted in DB")
     return 0
 
 
 async def cmd_rotate(settings: CliSettings) -> int:
     settings.require_master_key()
-    settings.require_zitadel_pat()
+    access_token = settings.resolve_access_token()
     engine = create_engine(settings.sqlalchemy_url)
     await init_db(engine)
     session_factory = create_session_factory(engine)
@@ -153,23 +244,13 @@ async def cmd_rotate(settings: CliSettings) -> int:
             await engine.dispose()
             return 1
 
-    async with _client(settings) as client:
-        # Immediate rotation on Zitadel side ("0s"); we keep previous briefly locally.
-        update = await client.put(
-            f"/admin/v1/email/http/{provider_id}",
-            json={
-                "endpoint": settings.zitadel_provider_endpoint,
-                "description": settings.zitadel_provider_description,
-                "expirationSigningKey": "0s",
-            },
+    async with _client(settings, access_token) as client:
+        signing_key = await _rotate_signing_key(
+            client,
+            provider_id=provider_id,
+            endpoint=settings.zitadel_provider_endpoint,
+            description=settings.zitadel_provider_description,
         )
-        update.raise_for_status()
-        body = update.json()
-        signing_key = body.get("signingKey") or body.get("signing_key")
-        if not signing_key:
-            print("error: rotate response missing signingKey", file=sys.stderr)
-            await engine.dispose()
-            return 1
 
     async with session_factory() as session:
         store = KeyStore(session, seal)
@@ -228,7 +309,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser(
-        "register", help="Create + activate HTTP email provider; store signing key"
+        "register",
+        help="Idempotent: create/activate HTTP email provider; store signing key",
     )
     sub.add_parser("rotate", help="Rotate signing key; keep previous briefly in DB")
     unlink_parser = sub.add_parser(
@@ -248,13 +330,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "register":
         try:
             return asyncio.run(cmd_register(settings))
-        except ValueError as exc:
+        except Exception as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
     if args.command == "rotate":
         try:
             return asyncio.run(cmd_rotate(settings))
-        except ValueError as exc:
+        except Exception as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
     if args.command == "unlink":

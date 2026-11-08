@@ -47,17 +47,17 @@ Verified against Zitadel `pkg/actions/signing.go` v4.16.0:
 - 300s tolerance, `hmac.compare_digest`
 - Fail closed: service **refuses to start** without an active key; no unsigned/debug mode
 
-Operator CLI (short-lived Zitadel PAT; never used by the running service):
+Operator CLI (never used by the running service). Prefer a **machine-user private key** (`ZITADEL_MACHINE_KEY_JSON`) so the CLI mints a short-lived access token — do not vault a long-lived PAT. Infra: `ansible-playbook playbooks/zitadel_notify_bootstrap.yml`.
 
 ```bash
 export MASTER_KEY=...
 # Prefer PG_* (infra) or DATABASE_URL override
 export PG_HOST=... PG_PORT=5432 PG_USER=zitadel_notify PG_PASSWORD=... PG_DATABASE=zitadel_notify
 export ZITADEL_BASE_URL=https://zitadel.ascend.example.com
-export ZITADEL_PAT=...   # short-lived
+export ZITADEL_MACHINE_KEY_JSON='{"type":"serviceaccount","keyId":"...","key":"...","userId":"..."}'
 export ZITADEL_PROVIDER_ENDPOINT=http://zitadel-notify:8080/zitadel/hook
 
-python -m cli register   # create + activate HTTP email provider; store signingKey encrypted
+python -m cli register   # idempotent create/activate + store signingKey encrypted
 python -m cli rotate     # rotate key; previous accepted briefly (SIGNING_KEY_OVERLAP_SECONDS)
 python -m cli unlink 'user@org'  # clear Telegram pin for preferredLoginName
 ```
