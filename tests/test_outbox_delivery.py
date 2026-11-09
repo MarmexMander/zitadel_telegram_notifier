@@ -30,7 +30,7 @@ def _invite_payload(*, nick: str = "alice_tg", login: str = "alice@org") -> dict
     return {
         "contextInfo": {
             "eventType": "user.human.initialization.code.added",
-            "recipientEmailAddress": "alice@example.com",
+            "recipientEmailAddress": f"{nick}@telegram",
         },
         "templateData": {
             "subject": "Initialize User",
@@ -104,7 +104,10 @@ async def test_pinned_user_gets_later_events_immediately(session, seal, settings
 
     await service.ingest_zitadel_payload(
         {
-            "contextInfo": {"eventType": "user.human.password.code.added"},
+            "contextInfo": {
+                "eventType": "user.human.password.code.added",
+                "recipientEmailAddress": "alice_tg@telegram",
+            },
             "templateData": {
                 "subject": "Reset password",
                 "greeting": "Hello,",
@@ -113,7 +116,6 @@ async def test_pinned_user_gets_later_events_immediately(session, seal, settings
                 "buttonText": "Reset",
             },
             "args": {
-                "nickName": "alice_tg",
                 "preferredLoginName": "alice@org",
             },
         }

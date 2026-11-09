@@ -156,7 +156,10 @@ async def test_binding_locale_from_payload_and_refresh(session, seal, settings) 
     service = NotifierService(session, seal, tg, settings)  # type: ignore[arg-type]
 
     invite = {
-        "contextInfo": {"eventType": "user.human.initialization.code.added"},
+        "contextInfo": {
+            "eventType": "user.human.initialization.code.added",
+            "recipientEmailAddress": "alice_tg@telegram",
+        },
         "templateData": {
             "subject": "Initialize User",
             "greeting": "Привіт,",
@@ -165,7 +168,6 @@ async def test_binding_locale_from_payload_and_refresh(session, seal, settings) 
             "buttonText": "Завершити",
         },
         "args": {
-            "nickName": "alice_tg",
             "preferredLoginName": "alice@org",
             "preferredLanguage": "uk-UA",
         },
@@ -197,7 +199,10 @@ async def test_binding_locale_from_payload_and_refresh(session, seal, settings) 
     tg.sent.clear()
     await service.ingest_zitadel_payload(
         {
-            "contextInfo": {"eventType": "user.human.password.code.added"},
+            "contextInfo": {
+                "eventType": "user.human.password.code.added",
+                "recipientEmailAddress": "alice_tg@telegram",
+            },
             "templateData": {
                 "subject": "Reset password",
                 "text": "Reset.",
@@ -205,7 +210,6 @@ async def test_binding_locale_from_payload_and_refresh(session, seal, settings) 
                 "buttonText": "Reset",
             },
             "args": {
-                "nickName": "alice_tg",
                 "preferredLoginName": "alice@org",
                 "preferredLanguage": "en-US",
             },

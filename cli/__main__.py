@@ -1,7 +1,7 @@
-"""python -m cli register|rotate|unlink|ensure-invite-action
+"""python -m cli register|rotate|unlink
 
-Auth for register/rotate/ensure-invite-action (prefer machine-user JWT key;
-never store a long-lived PAT in vault):
+Auth for register/rotate (prefer machine-user JWT key; never store a long-lived
+PAT in vault). Bootstrap-only: the running service holds no Zitadel credentials.
 
 - ZITADEL_MACHINE_KEY_JSON — full Zitadel service-account key JSON → short-lived access token
 - ZITADEL_ACCESS_TOKEN — already-minted bearer (seconds–minutes)
@@ -20,26 +20,13 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.crypto import Seal, fingerprint
-from app.db import (
-    ActionKeyStore,
-    BindingStore,
-    KeyStore,
-    create_engine,
-    create_session_factory,
-    init_db,
-)
+from app.db import BindingStore, KeyStore, create_engine, create_session_factory, init_db
 from app.zitadel_auth import load_machine_key_from_env_or_file, mint_access_token
 
 
 # Pinned bridge IP (not Docker DNS): AddEmailProviderHTTP resolves the host for
 # denylist checks while notify may still be down (no signing key → no container).
 DEFAULT_ENDPOINT = "http://172.30.50.2:8080/zitadel/hook"
-DEFAULT_ACTION_ENDPOINT = "http://172.30.50.2:8080/zitadel/action/invite"
-DEFAULT_ACTION_NAME = "telegram-invite-on-nickname"
-ACTION_EVENTS = (
-    "user.human.profile.changed",
-    "user.human.added",
-)
 
 
 class CliSettings(BaseSettings):
@@ -69,12 +56,6 @@ class CliSettings(BaseSettings):
         default="Telegram notifier", alias="ZITADEL_PROVIDER_DESCRIPTION"
     )
     zitadel_provider_id: str | None = Field(default=None, alias="ZITADEL_PROVIDER_ID")
-    zitadel_action_endpoint: str = Field(
-        default=DEFAULT_ACTION_ENDPOINT, alias="ZITADEL_ACTION_ENDPOINT"
-    )
-    zitadel_action_name: str = Field(
-        default=DEFAULT_ACTION_NAME, alias="ZITADEL_ACTION_NAME"
-    )
     signing_key_overlap_seconds: int = Field(
         default=300, alias="SIGNING_KEY_OVERLAP_SECONDS"
     )
@@ -345,160 +326,6 @@ async def cmd_unlink(settings: CliSettings, preferred_login_name: str) -> int:
     return 1
 
 
-async def _find_action_target(
-    client: httpx.AsyncClient, name: str
-) -> dict | None:
-    """Find Actions target by exact name (search API, then filter)."""
-    resp = await client.post(
-        "/v2/actions/targets/search",
-        json={
-            "pagination": {"offset": 0, "limit": 100, "asc": True},
-            "queries": [
-                {
-                    "targetNameQuery": {
-                        "name": name,
-                        "method": "TEXT_QUERY_METHOD_EQUALS",
-                    }
-                }
-            ],
-        },
-    )
-    if resp.status_code == 404:
-        # Older builds: fall back to empty query + client filter.
-        resp = await client.post(
-            "/v2/actions/targets/search",
-            json={"pagination": {"offset": 0, "limit": 200, "asc": True}},
-        )
-    _raise_for_status(resp, action="list action targets")
-    body = resp.json()
-    targets = body.get("targets") or body.get("result") or []
-    for item in targets:
-        if item.get("name") == name:
-            return item
-    return None
-
-
-async def _set_event_execution(
-    client: httpx.AsyncClient, *, event: str, target_id: str
-) -> None:
-    resp = await client.put(
-        "/v2/actions/executions",
-        json={
-            "condition": {"event": {"event": event}},
-            "targets": [target_id],
-        },
-    )
-    _raise_for_status(resp, action=f"set execution for {event}")
-
-
-async def cmd_ensure_invite_action(settings: CliSettings) -> int:
-    """
-    Idempotent: create/update Actions v2 target + executions for invite-on-nickname.
-
-    Stores the target signing key encrypted in the notify DB (separate from the
-    HTTP email provider key). Machine user needs action.target.* + action.execution.*
-    and user.write (CreateInviteCode at runtime).
-    """
-    settings.require_master_key()
-    access_token = settings.resolve_access_token()
-    engine = create_engine(settings.sqlalchemy_url)
-    await init_db(engine)
-    session_factory = create_session_factory(engine)
-    seal = Seal(settings.master_key)
-    name = settings.zitadel_action_name.strip() or DEFAULT_ACTION_NAME
-    endpoint = settings.zitadel_action_endpoint.strip() or DEFAULT_ACTION_ENDPOINT
-
-    async with _client(settings, access_token) as client:
-        existing = await _find_action_target(client, name)
-        if existing:
-            target_id = str(existing["id"])
-            signing_key = existing.get("signingKey") or existing.get("signing_key")
-            current_endpoint = existing.get("endpoint") or ""
-            if current_endpoint != endpoint or not signing_key:
-                update = await client.post(
-                    f"/v2/actions/targets/{target_id}",
-                    json={
-                        "name": name,
-                        "endpoint": endpoint,
-                        "timeout": "15s",
-                        "restAsync": {},
-                        "payloadType": "PAYLOAD_TYPE_JSON",
-                        **(
-                            {"expirationSigningKey": "0s"}
-                            if not signing_key
-                            else {}
-                        ),
-                    },
-                )
-                _raise_for_status(update, action=f"update action target {target_id}")
-                body = update.json()
-                if body.get("signingKey") or body.get("signing_key"):
-                    signing_key = body.get("signingKey") or body.get("signing_key")
-                if not signing_key:
-                    got = await client.get(f"/v2/actions/targets/{target_id}")
-                    _raise_for_status(got, action=f"get action target {target_id}")
-                    target = got.json().get("target") or got.json()
-                    signing_key = target.get("signingKey") or target.get("signing_key")
-                action = "updated"
-            else:
-                action = "existing"
-            if not signing_key:
-                # Force rotate so we have a key in the DB.
-                update = await client.post(
-                    f"/v2/actions/targets/{target_id}",
-                    json={"expirationSigningKey": "0s"},
-                )
-                _raise_for_status(update, action=f"rotate action target {target_id}")
-                signing_key = update.json().get("signingKey") or update.json().get(
-                    "signing_key"
-                )
-                action = "rotated"
-        else:
-            create = await client.post(
-                "/v2/actions/targets",
-                json={
-                    "name": name,
-                    "endpoint": endpoint,
-                    "timeout": "15s",
-                    "restAsync": {},
-                    "payloadType": "PAYLOAD_TYPE_JSON",
-                },
-            )
-            _raise_for_status(create, action="create action target")
-            body = create.json()
-            target_id = str(body["id"])
-            signing_key = body.get("signingKey") or body.get("signing_key")
-            action = "created"
-
-        if not signing_key:
-            raise RuntimeError("action target response missing signingKey")
-
-        for event in ACTION_EVENTS:
-            await _set_event_execution(client, event=event, target_id=target_id)
-
-    async with session_factory() as session:
-        store = ActionKeyStore(session, seal)
-        await store.upsert_meta(target_id=target_id, name=name, endpoint=endpoint)
-        # Always refresh active key from Zitadel so DB matches what signs webhooks.
-        await store.store_active(
-            target_id=target_id,
-            signing_key=signing_key,
-            fingerprint=fingerprint(signing_key),
-            demote_previous=True,
-            overlap_seconds=settings.signing_key_overlap_seconds,
-        )
-        await session.commit()
-
-    await engine.dispose()
-    print(
-        f"{action} action target id={target_id} name={name!r} "
-        f"endpoint={endpoint} key_fp={fingerprint(signing_key)}"
-    )
-    print(f"executions set for: {', '.join(ACTION_EVENTS)}")
-    print("action signing key stored encrypted in DB")
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m cli",
@@ -510,13 +337,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Idempotent: create/activate HTTP email provider; store signing key",
     )
     sub.add_parser("rotate", help="Rotate signing key; keep previous briefly in DB")
-    sub.add_parser(
-        "ensure-invite-action",
-        help=(
-            "Idempotent: Actions v2 target+executions for invite-on-nickname; "
-            "store action signing key"
-        ),
-    )
     unlink_parser = sub.add_parser(
         "unlink", help="Clear Telegram pin for a preferredLoginName"
     )
@@ -540,12 +360,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "rotate":
         try:
             return asyncio.run(cmd_rotate(settings))
-        except Exception as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-    if args.command == "ensure-invite-action":
-        try:
-            return asyncio.run(cmd_ensure_invite_action(settings))
         except Exception as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2

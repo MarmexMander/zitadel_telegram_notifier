@@ -12,6 +12,7 @@ from app.crypto import Seal
 from app.db import BindingStore, OutboxStore
 from app.handles import InvalidHandleError, normalize_handle
 from app.i18n import DEFAULT_LOCALE, extract_locale, resolve_locale, t
+from app.recipient import NotForChannelError, recipient_from_payload
 from app.telegram import TelegramClient
 
 logger = logging.getLogger(__name__)
@@ -39,14 +40,26 @@ class NotifierService:
         event_type = str(context.get("eventType") or "")
         locale = extract_locale(payload) or DEFAULT_LOCALE
 
-        raw_nick = args.get("nickName")
         try:
-            handle = normalize_handle(raw_nick if isinstance(raw_nick, str) else None)
+            recipient = recipient_from_payload(
+                payload,
+                suffix=self._settings.recipient_suffix,
+            )
+        except NotForChannelError as exc:
+            # Another channel / real mailbox. In the split deployment the router
+            # should never send these here; standalone, there is nothing to do.
+            logger.info(
+                "ignoring notification not addressed to @%s login=%r: %s",
+                self._settings.recipient_suffix,
+                preferred,
+                exc,
+            )
+            return
         except InvalidHandleError as exc:
             await self._telegram.notify_admins(
                 self._settings.admin_id_list,
                 t(
-                    "admin_invalid_nickname",
+                    "admin_invalid_recipient",
                     DEFAULT_LOCALE,
                     login=preferred,
                     error=exc,
@@ -63,6 +76,7 @@ class NotifierService:
             logger.warning("dropping notification: invalid handle login=%r", preferred)
             return
 
+        handle = recipient.handle
         if not preferred:
             preferred = handle
 

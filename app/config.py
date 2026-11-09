@@ -53,10 +53,9 @@ class Settings(BaseSettings):
         default=False, alias="SKIP_TELEGRAM_WEBHOOK_REGISTER"
     )
 
-    # Runtime Zitadel API (Actions invite-on-nickname). Optional until ensure-invite-action.
-    zitadel_base_url: str = Field(default="", alias="ZITADEL_BASE_URL")
-    zitadel_machine_key_file: str = Field(default="", alias="ZITADEL_MACHINE_KEY_FILE")
-    zitadel_machine_key_json: str = Field(default="", alias="ZITADEL_MACHINE_KEY_JSON")
+    # Address scheme: "<handle>@<suffix>" in the Zitadel email field (dotless domain).
+    recipient_suffix: str = Field(default="telegram", alias="RECIPIENT_SUFFIX")
+
 
     @field_validator("public_base_url")
     @classmethod
@@ -72,6 +71,17 @@ class Settings(BaseSettings):
         if not value or not value.strip():
             raise ValueError("required secret must be non-empty")
         return value.strip()
+
+    @field_validator("recipient_suffix")
+    @classmethod
+    def _suffix_dotless(cls, value: str) -> str:
+        suffix = value.strip().lstrip("@").casefold()
+        if not suffix or "." in suffix or "@" in suffix:
+            raise ValueError(
+                "RECIPIENT_SUFFIX must be a dotless label (e.g. telegram) "
+                "so it cannot collide with real email domains"
+            )
+        return suffix
 
     @field_validator("bot_mode")
     @classmethod

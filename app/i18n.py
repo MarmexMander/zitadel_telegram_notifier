@@ -33,10 +33,10 @@ _CATALOGS: dict[str, dict[str, str]] = {
             "Зачекайте на запрошення від адміністратора."
         ),
     },
-    "admin_invalid_nickname": {
-        "en": "Zitadel notify: invalid nickName for login={login!r}: {error}",
+    "admin_invalid_recipient": {
+        "en": "Zitadel notify: invalid recipient for login={login!r}: {error}",
         "uk": (
-            "Zitadel notify: некоректний nickName для login={login!r}: {error}"
+            "Zitadel notify: некоректний отримувач для login={login!r}: {error}"
         ),
     },
     "open_link": {
