@@ -53,6 +53,11 @@ class Settings(BaseSettings):
         default=False, alias="SKIP_TELEGRAM_WEBHOOK_REGISTER"
     )
 
+    # Runtime Zitadel API (Actions invite-on-nickname). Optional until ensure-invite-action.
+    zitadel_base_url: str = Field(default="", alias="ZITADEL_BASE_URL")
+    zitadel_machine_key_file: str = Field(default="", alias="ZITADEL_MACHINE_KEY_FILE")
+    zitadel_machine_key_json: str = Field(default="", alias="ZITADEL_MACHINE_KEY_JSON")
+
     @field_validator("public_base_url")
     @classmethod
     def _https_public_base(cls, value: str) -> str:

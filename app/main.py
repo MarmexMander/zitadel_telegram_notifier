@@ -11,9 +11,17 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from app.action_invite import handle_profile_event
 from app.config import Settings, get_settings
 from app.crypto import Seal
-from app.db import KeyStore, create_engine, create_session_factory, init_db
+from app.db import (
+    ActionKeyStore,
+    AutoInviteStore,
+    KeyStore,
+    create_engine,
+    create_session_factory,
+    init_db,
+)
 from app.service import NotifierService
 from app.signature import SignatureError, validate_payload
 from app.telegram import TelegramClient
@@ -118,6 +126,60 @@ async def zitadel_hook(
         await session.commit()
 
     # Always 2xx after accept into outbox (even if user has not /start'd yet).
+    return Response(status_code=204)
+
+
+@app.post("/zitadel/action/invite")
+async def zitadel_action_invite(
+    request: Request,
+    zitadel_signature: str | None = Header(default=None, alias="ZITADEL-Signature"),
+    x_zitadel_signature: str | None = Header(
+        default=None, alias="X-ZITADEL-Signature"
+    ),
+) -> Response:
+    """
+    Actions v2 event target: auto CreateInviteCode when Nickname is set on a fresh user.
+
+    Registered by `python -m cli ensure-invite-action` (bootstrap playbook step).
+    """
+    raw = await request.body()
+    header = zitadel_signature or x_zitadel_signature
+
+    async with state.session_factory() as session:
+        action_keys = ActionKeyStore(session, state.seal)
+        signing_keys = await action_keys.list_verification_keys()
+        if not signing_keys:
+            logger.warning("rejected action invite: no action signing key (run ensure-invite-action)")
+            raise HTTPException(status_code=503, detail="action signing key missing")
+        try:
+            validate_payload(
+                raw,
+                header,
+                signing_keys,
+                tolerance_seconds=state.settings.signature_tolerance_seconds,
+            )
+        except SignatureError:
+            logger.warning("rejected action invite: signature verification failed")
+            raise HTTPException(status_code=401, detail="invalid signature") from None
+
+        try:
+            payload: dict[str, Any] = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise HTTPException(status_code=400, detail="invalid json") from None
+
+        result = await handle_profile_event(
+            body=payload,
+            store=AutoInviteStore(session),
+            base_url=state.settings.zitadel_base_url,
+            machine_key_file=state.settings.zitadel_machine_key_file,
+            machine_key_json=state.settings.zitadel_machine_key_json,
+        )
+        await session.commit()
+
+    if result.status == "error":
+        # 5xx so operators see failures; async targets ignore body.
+        logger.error("action invite handler error: %s", result.detail)
+        raise HTTPException(status_code=502, detail="invite action failed")
     return Response(status_code=204)
 
 
